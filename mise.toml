@@ -1,0 +1,20 @@
+[tools]
+oras = "1.2.2"
+jq   = "1.7.1"
+
+[env]
+# Default registry/namespace for `mise run build`. Override locally.
+REGISTRY = "ghcr.io/OWNER/oci-modpack-demo"
+TAG = "latest"
+
+[tasks.build]
+description = "Build the demo packs as deterministic tar.gz layers (no push)"
+run = "PUSH=false ./scripts/build-and-push.sh"
+
+[tasks.push]
+description = "Build and push all three packs to $REGISTRY"
+run = "./scripts/build-and-push.sh"
+
+[tasks.consume]
+description = "Pull a pack from the registry and extract it locally for inspection"
+run = "DATA_DIR=./out/extracted GENERIC_PACKS_OCI=$REGISTRY/tech:$TAG ./examples/consume/pull-and-extract.sh"

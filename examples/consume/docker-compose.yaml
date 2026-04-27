@@ -1,0 +1,52 @@
+# End-to-end illustration: today's docker-minecraft-server can already
+# consume an OCI modpack with zero changes by using a tiny init container
+# that pulls + extracts the artifact onto the shared `/data` volume before
+# the server starts.
+#
+# Once docker-minecraft-server learns about GENERIC_PACKS_OCI natively,
+# the `oci-init` service below collapses into a single env var on the
+# `mc` service.
+#
+# Try it:
+#   GHCR_USER=ghcr-username GHCR_TOKEN=ghp_xxx \
+#     docker compose -f examples/consume/docker-compose.yaml up
+services:
+  oci-init:
+    image: ghcr.io/oras-project/oras:v1.2.2
+    entrypoint: ["/bin/sh", "-c"]
+    environment:
+      GHCR_USER: ${GHCR_USER:?set GHCR_USER}
+      GHCR_TOKEN: ${GHCR_TOKEN:?set GHCR_TOKEN}
+      REF_TECH: ${REF_TECH:-ghcr.io/OWNER/oci-modpack-demo/tech:latest}
+    command: |
+      set -e
+      echo "$$GHCR_TOKEN" | oras login ghcr.io -u "$$GHCR_USER" --password-stdin
+      mkdir -p /staging
+      oras pull "$$REF_TECH" --output /staging
+      cd /staging
+      # base layer first, overlay second (sorted lexicographically here only
+      # because our build names them base.tar.gz / <pack>.tar.gz; in real
+      # code, walk the manifest's .layers in order).
+      for f in $$(ls *.tar.gz | sort); do
+        echo "extracting $$f"
+        tar -xzf "$$f" -C /data
+      done
+    volumes:
+      - mc-data:/data
+
+  mc:
+    image: itzg/minecraft-server
+    depends_on:
+      oci-init:
+        condition: service_completed_successfully
+    environment:
+      EULA: "TRUE"
+      TYPE: PAPER
+      MEMORY: 2G
+    ports:
+      - "25565:25565"
+    volumes:
+      - mc-data:/data
+
+volumes:
+  mc-data:

@@ -1,0 +1,5 @@
+# tech-pack-specific config overlay.
+# Files under packs/<name>/config/ overlay-merge onto packs/base/config/
+# inside the running container, applied via GENERIC_PACKS in declared order.
+flavor = "tech"
+energy-units = "joules"
