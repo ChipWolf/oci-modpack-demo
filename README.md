@@ -119,13 +119,15 @@ packs/
 └── adventure/           # tar'd into L3
     └── mods/
 scripts/
-└── build-and-push.sh    # deterministic tar → oras push to $REGISTRY/<pack>:$TAG
+├── build-and-push.sh    # deterministic tar -> oras push to $REGISTRY/<pack>:$TAG
+└── bench.sh             # compare plain-zip vs OCI-layered layouts on synthetic content
 examples/
 └── consume/
     ├── pull-and-extract.sh   # reference flow for the consumer side
     └── docker-compose.yaml   # works against today's itzg/minecraft-server
 .github/workflows/
-└── publish.yaml         # CI: build + push all three packs to GHCR
+├── publish.yaml         # CI: build + push all three packs to GHCR
+└── bench.yaml           # workflow_dispatch: run scripts/bench.sh, post results to summary
 mise.toml                # `oras`, `jq` versions + task shortcuts
 ```
 
@@ -244,6 +246,48 @@ What that prints today (truncated for readability):
 `sha256:0c79c9cb...` is byte-identical across all three manifests, so GHCR
 stored that 864-byte blob exactly once. The second layer differs per pack.
 That's the whole demo, observable from any machine with `oras` and `jq`.
+
+---
+
+## Storage and bandwidth comparison
+
+To put numbers on the layer-reuse claim,
+[`.github/workflows/bench.yaml`](.github/workflows/bench.yaml) builds the
+*same* synthetic content (a 5 MiB shared base + a 1 MiB per-pack overlay,
+filled with `/dev/urandom` so it's essentially incompressible) under two
+layouts and pushes both to GHCR:
+
+- **plain zip**: each pack ships as one `.zip` containing merged base +
+  overlay content, pushed as a single-layer OCI artifact. This mirrors
+  today's `GENERIC_PACK` distribution shape.
+- **OCI layered**: a shared base layer plus a per-pack overlay layer, the
+  layout the main publish workflow produces.
+
+Both layouts go through the same registry, same auth, same network path,
+so the only variable is whether layers are deduplicated.
+
+Results from
+[run #24997608057](https://github.com/ChipWolf/oci-modpack-demo/actions/runs/24997608057)
+on a stock GitHub-hosted Ubuntu runner (3 packs, 5 MiB base + 1 MiB overlay):
+
+| metric                                       | plain zip   | OCI layered | reduction |
+| -------------------------------------------- | ----------- | ----------- | --------- |
+| publisher storage (3 packs in registry)      | 18.01 MB    | 8.01 MB     | 2.25x     |
+| consumer wire bytes, pull all 3 cold         | 18.01 MB    | 8.01 MB     | 2.25x     |
+| consumer pull wall time, all 3 cold          | 1.910 s     | 1.619 s     | 1.18x     |
+| incremental cost of adding a pack on a host  | 6.01 MB     | 1.01 MB     | 6.00x     |
+
+The headline number is the bottom row: under the OCI layout, **adding a
+new pack to a server that already has any sibling pack costs only the
+overlay layer** (1.01 MB), versus the full pack contents (6.01 MB) for a
+plain zip. Storage savings scale linearly with the shared-base size, and
+the savings widen as more packs share the base.
+
+Wall-time speedup is only ~1.18x because at this scale every pull is
+dominated by per-blob HTTP round-trip overhead, not byte transfer. The
+savings on a real-world ~200 MiB shared base would be both larger and more
+visible in the timing column. Re-run with `gh workflow run bench.yaml -f
+base_bytes=209715200 -f overlay_bytes=52428800` to test bigger sizes.
 
 ---
 
