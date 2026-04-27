@@ -10,14 +10,14 @@ A minimal reproduction repo for
 If you've ever `docker push`ed an image to GHCR, you've already used OCI.
 This repo applies the same layered-storage trick to modpacks: it builds
 three packs that share a common base, pushes them to a registry, and shows
-the registry storing the shared content **exactly once** — so a server
-that pulls all three only downloads the shared bytes a single time.
+the registry storing the shared content **exactly once**, so a server that
+pulls all three only downloads the shared bytes a single time.
 
 ## Background: OCI in one minute
 
 - A Docker image is, on the wire, just a small JSON **manifest** plus a list
-  of tarball **layers**, each addressed by `sha256:…`.
-- A **registry** (Docker Hub, GHCR, Harbor, ECR, Artifactory, …) stores
+  of tarball **layers**, each addressed by `sha256:...`.
+- A **registry** (Docker Hub, GHCR, Harbor, ECR, Artifactory, ...) stores
   each layer blob exactly once, no matter how many manifests reference it.
   When you pull an image you already have most layers for, only the new
   layers come down the wire.
@@ -26,7 +26,7 @@ that pulls all three only downloads the shared bytes a single time.
   Every modern registry and every modern container runtime speaks it.
 - An **OCI artifact** is exactly that same manifest + layers plumbing,
   applied to arbitrary content. Helm charts, WASM modules, AI models,
-  Cosign signatures, SBOMs — all live in OCI registries today. The only
+  Cosign signatures, and SBOMs all live in OCI registries today. The only
   thing that changes is a custom `artifactType` field on the manifest so
   tools know "this isn't a runnable container, don't try to `docker run`
   it."
@@ -39,29 +39,29 @@ it to any registry your users can already reach. Nothing new gets invented.
 
 Today `GENERIC_PACK` / `GENERIC_PACKS` accepts a URL or a path to a single
 `.zip` / `.tgz` file ([docs][generic-packs]). That works, but every pack
-ships as one opaque blob — if three packs share 90% of their content there
+ships as one opaque blob. If three packs share 90% of their content there
 is no deduplication on the wire or on disk, and there's no built-in answer
 for pinning, signing, mirroring, or garbage-collecting old packs.
 
 Layered OCI artifacts give all of that for free using the exact same tools
 you already use for container images:
 
-- **Layer reuse** — shared content becomes a shared layer, uploaded once and
+- **Layer reuse**: shared content becomes a shared layer, uploaded once and
   downloaded once across every pack that references it.
-- **Pinning** — `…@sha256:…` refs are built in; no separate checksum env
+- **Pinning**: `...@sha256:...` refs are built in; no separate checksum env
   var needed.
-- **Signing** — `cosign sign` / `cosign verify` work unchanged on artifacts.
-- **Standard auth** — `oras login` reuses `~/.docker/config.json`, so GHCR,
+- **Signing**: `cosign sign` / `cosign verify` work unchanged on artifacts.
+- **Standard auth**: `oras login` reuses `~/.docker/config.json`, so GHCR,
   Harbor, ECR, GCR, Artifactory, and any other OCI-compliant registry all
   authenticate identically.
-- **Mirroring** — registries are designed for replication; large server
+- **Mirroring**: registries are designed for replication; large server
   fleets can mirror packs into a private registry without touching
   modpack-author CDNs.
-- **Garbage collection** — registries already know how to GC unreferenced
+- **Garbage collection**: registries already know how to GC unreferenced
   blobs, so retiring an old pack tag actually frees the storage.
 
 > [!NOTE]
-> The artifacts in this repo are intentionally tiny placeholders — the
+> The artifacts in this repo are intentionally tiny placeholders; the
 > point isn't the content, it's the layer plumbing.
 
 [generic-packs]: https://docker-minecraft-server.readthedocs.io/en/latest/mods-and-plugins/#generic-pack-files
@@ -108,10 +108,10 @@ consumer regardless of how many packs they pull.
 
 ```text
 packs/
-├── base/                # tar'd into L0 — shared by every pack
+├── base/                # tar'd into L0, shared by every pack
 │   ├── config/
 │   └── mods/
-├── tech/                # tar'd into L1 — pack-specific overlay
+├── tech/                # tar'd into L1, pack-specific overlay
 │   ├── config/
 │   └── mods/
 ├── magic/               # tar'd into L2
@@ -161,11 +161,63 @@ byte-identical tarball → byte-identical sha256 → registry deduplication.
 
 ---
 
+## What's in the manifest?
+
+The packs are public, so anyone can fetch a manifest with no auth:
+
+```sh
+oras manifest fetch ghcr.io/chipwolf/oci-modpack-demo/adventure:latest --pretty
+```
+
+```json
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "artifactType": "application/vnd.itzg.minecraft.modpack.v1+json",
+  "config": {
+    "mediaType": "application/vnd.oci.empty.v1+json",
+    "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "size": 2,
+    "data": "e30="
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.itzg.minecraft.modpack.layer.v1.tar+gzip",
+      "digest": "sha256:0c79c9cbc02ab385b147cd7799fd4aac5051542a65f77991f13ade5bbf0a16eb",
+      "size": 864,
+      "annotations": { "org.opencontainers.image.title": "out/base.tar.gz" }
+    },
+    {
+      "mediaType": "application/vnd.itzg.minecraft.modpack.layer.v1.tar+gzip",
+      "digest": "sha256:5836c2a00935f8d5460150d2a6b10e26eb45bbb9a90f4b995a1b2c568a7c967b",
+      "size": 278,
+      "annotations": { "org.opencontainers.image.title": "out/adventure.tar.gz" }
+    }
+  ],
+  "annotations": {
+    "org.opencontainers.image.title": "adventure",
+    "org.opencontainers.image.description": "Demo Minecraft modpack (adventure) shipped as an OCI artifact",
+    "org.opencontainers.image.source": "https://github.com/ChipWolf/oci-modpack-demo"
+  }
+}
+```
+
+The `mediaType` strings are how the registry, the client, and any tooling
+in between agree on what each blob is. Four show up here:
+
+| `mediaType` | Where | What it means |
+| --- | --- | --- |
+| `application/vnd.oci.image.manifest.v1+json` | top-level | The manifest's own format. Same JSON shape Docker uses for container images; we reuse it verbatim. |
+| `application/vnd.itzg.minecraft.modpack.v1+json` | `artifactType` | The OCI 1.1 "this isn't a runnable container" marker. The string is namespaced so itzg's tooling can recognise its own artifacts and ignore everyone else's. |
+| `application/vnd.oci.empty.v1+json` | `config` | The standard empty config blob (literally the two bytes `{}`, base64-encoded as `e30=` in the inline `data` field). Container images put image config here describing entrypoint, env, etc.; modpacks have nothing to put, so OCI 1.1 standardised this empty-config sentinel. |
+| `application/vnd.itzg.minecraft.modpack.layer.v1.tar+gzip` | each `layers[]` entry | The layer payload format: a tar.gz of the pack contents. The `+gzip` suffix matches container layers; the prefix tells consumers "this is modpack content, extract it where modpacks go." |
+
+The two `layers[]` entries are the actual pack content. Compare them across
+packs to see the shared base.
+
 ## Verifying layer reuse
 
-The three packs are already published to GHCR. Fetch each manifest and look
-at the first layer's digest — no auth required because the packages are
-public:
+Fetch all three manifests and project to digest + size:
 
 ```sh
 for pack in tech magic adventure; do
@@ -179,17 +231,17 @@ What that prints today (truncated for readability):
 
 ```text
 === tech ===
-{ "digest": "sha256:0c79c9cb…", "size": 864 }   ← shared base layer
-{ "digest": "sha256:be9e31a3…", "size": 567 }
+{ "digest": "sha256:0c79c9cb...", "size": 864 }   <-- shared base layer
+{ "digest": "sha256:be9e31a3...", "size": 567 }
 === magic ===
-{ "digest": "sha256:0c79c9cb…", "size": 864 }   ← same base layer
-{ "digest": "sha256:19b68c80…", "size": 314 }
+{ "digest": "sha256:0c79c9cb...", "size": 864 }   <-- same base layer
+{ "digest": "sha256:19b68c80...", "size": 314 }
 === adventure ===
-{ "digest": "sha256:0c79c9cb…", "size": 864 }   ← same base layer
-{ "digest": "sha256:5836c2a0…", "size": 278 }
+{ "digest": "sha256:0c79c9cb...", "size": 864 }   <-- same base layer
+{ "digest": "sha256:5836c2a0...", "size": 278 }
 ```
 
-`sha256:0c79c9cb…` is byte-identical across all three manifests, so GHCR
+`sha256:0c79c9cb...` is byte-identical across all three manifests, so GHCR
 stored that 864-byte blob exactly once. The second layer differs per pack.
 That's the whole demo, observable from any machine with `oras` and `jq`.
 
@@ -226,7 +278,7 @@ The two pieces of new behavior on the docker-minecraft-server side:
 2. **Fetch + walk layers.** Either shell out to `oras` / `crane` (small
    static binaries) or implement a lightweight pull in
    [`mc-image-helper`][helper]. Each pulled layer is just a tar.gz, which
-   the existing `GENERIC_PACK` code already knows how to extract — including
+   the existing `GENERIC_PACK` code already knows how to extract, including
    the env-var interpolation, `SYNC_SKIP_NEWER_IN_DESTINATION`, and
    `REMOVE_OLD_MODS` semantics.
 
