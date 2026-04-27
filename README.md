@@ -5,32 +5,70 @@ A minimal reproduction repo for
 **ship Minecraft modpacks as OCI artifacts and consume them via
 `GENERIC_PACKS`.**
 
-The whole repo exists to demonstrate one property: when several packs share
-a common base, an OCI registry stores the shared content **once** and clients
-download it **once**, no matter how many sibling packs they pull.
+## TL;DR
+
+If you've ever `docker push`ed an image to GHCR, you've already used OCI.
+This repo applies the same layered-storage trick to modpacks: it builds
+three packs that share a common base, pushes them to a registry, and shows
+the registry storing the shared content **exactly once** — so a server
+that pulls all three only downloads the shared bytes a single time.
+
+## Background: OCI in one minute
+
+- A Docker image is, on the wire, just a small JSON **manifest** plus a list
+  of tarball **layers**, each addressed by `sha256:…`.
+- A **registry** (Docker Hub, GHCR, Harbor, ECR, Artifactory, …) stores
+  each layer blob exactly once, no matter how many manifests reference it.
+  When you pull an image you already have most layers for, only the new
+  layers come down the wire.
+- The wire format and registry API are governed by the
+  **[Open Container Initiative](https://opencontainers.org/)** ("OCI").
+  Every modern registry and every modern container runtime speaks it.
+- An **OCI artifact** is exactly that same manifest + layers plumbing,
+  applied to arbitrary content. Helm charts, WASM modules, AI models,
+  Cosign signatures, SBOMs — all live in OCI registries today. The only
+  thing that changes is a custom `artifactType` field on the manifest so
+  tools know "this isn't a runnable container, don't try to `docker run`
+  it."
+
+So "ship a modpack as an OCI artifact" is really just: tar up the pack's
+files into one or more layers, write a manifest that lists them, and push
+it to any registry your users can already reach. Nothing new gets invented.
+
+## Why this matters for modpack distribution
+
+Today `GENERIC_PACK` / `GENERIC_PACKS` accepts a URL or a path to a single
+`.zip` / `.tgz` file ([docs][generic-packs]). That works, but every pack
+ships as one opaque blob — if three packs share 90% of their content there
+is no deduplication on the wire or on disk, and there's no built-in answer
+for pinning, signing, mirroring, or garbage-collecting old packs.
+
+Layered OCI artifacts give all of that for free using the exact same tools
+you already use for container images:
+
+- **Layer reuse** — shared content becomes a shared layer, uploaded once and
+  downloaded once across every pack that references it.
+- **Pinning** — `…@sha256:…` refs are built in; no separate checksum env
+  var needed.
+- **Signing** — `cosign sign` / `cosign verify` work unchanged on artifacts.
+- **Standard auth** — `oras login` reuses `~/.docker/config.json`, so GHCR,
+  Harbor, ECR, GCR, Artifactory, and any other OCI-compliant registry all
+  authenticate identically.
+- **Mirroring** — registries are designed for replication; large server
+  fleets can mirror packs into a private registry without touching
+  modpack-author CDNs.
+- **Garbage collection** — registries already know how to GC unreferenced
+  blobs, so retiring an old pack tag actually frees the storage.
 
 > [!NOTE]
-> The artifacts in this repo are intentionally tiny placeholders. The point
-> isn't the content — it's the layer plumbing.
-
----
-
-## Why OCI artifacts?
-
-Today `GENERIC_PACK` / `GENERIC_PACKS` accepts a URL or a path to a `.zip` /
-`.tgz` file ([docs][generic-packs]). That works, but every pack ships as a
-single opaque blob; if three packs share 90% of their content there is no
-deduplication on the wire or on disk.
-
-OCI artifacts solve exactly this problem: a manifest references one or more
-content-addressed layers, the registry stores each unique blob once, and the
-client only downloads layers it doesn't already have. This is how container
-images already work; OCI artifacts just relax the "must be a runnable image"
-constraint.
+> The artifacts in this repo are intentionally tiny placeholders — the
+> point isn't the content, it's the layer plumbing.
 
 [generic-packs]: https://docker-minecraft-server.readthedocs.io/en/latest/mods-and-plugins/#generic-pack-files
 
-### The benefit, visualized
+---
+
+## The benefit, visualized
 
 ```mermaid
 flowchart LR
@@ -125,18 +163,35 @@ byte-identical tarball → byte-identical sha256 → registry deduplication.
 
 ## Verifying layer reuse
 
-After pushing, fetch each manifest and look at the first layer's digest:
+The three packs are already published to GHCR. Fetch each manifest and look
+at the first layer's digest — no auth required because the packages are
+public:
 
 ```sh
 for pack in tech magic adventure; do
   echo "=== ${pack} ==="
-  oras manifest fetch ghcr.io/<you>/oci-modpack-demo/${pack}:v0.1.0 \
+  oras manifest fetch ghcr.io/chipwolf/oci-modpack-demo/${pack}:latest \
     | jq '.layers[] | {digest, size}'
 done
 ```
 
-You should see the same `sha256:…` for the first layer in all three
-manifests, with different second-layer digests. That's the demo.
+What that prints today (truncated for readability):
+
+```text
+=== tech ===
+{ "digest": "sha256:0c79c9cb…", "size": 864 }   ← shared base layer
+{ "digest": "sha256:be9e31a3…", "size": 567 }
+=== magic ===
+{ "digest": "sha256:0c79c9cb…", "size": 864 }   ← same base layer
+{ "digest": "sha256:19b68c80…", "size": 314 }
+=== adventure ===
+{ "digest": "sha256:0c79c9cb…", "size": 864 }   ← same base layer
+{ "digest": "sha256:5836c2a0…", "size": 278 }
+```
+
+`sha256:0c79c9cb…` is byte-identical across all three manifests, so GHCR
+stored that 864-byte blob exactly once. The second layer differs per pack.
+That's the whole demo, observable from any machine with `oras` and `jq`.
 
 ---
 
@@ -193,22 +248,6 @@ flow today via an `oci-init` sidecar that runs against an unmodified
 Existing `GENERIC_PACK*` knobs (`SKIP_GENERIC_PACK_UPDATE_CHECK`,
 `FORCE_GENERIC_PACK_UPDATE`, `GENERIC_PACKS_DISABLE_MODS`, etc.) keep their
 semantics.
-
----
-
-## Wider benefits beyond layer reuse
-
-- **Content-addressed by digest** — `…@sha256:…` refs make pack pinning
-  trivially verifiable; no separate checksum env var needed.
-- **Cosign / Sigstore signing** — same toolchain that signs container
-  images works on artifacts; downstream operators can require signatures.
-- **Standard auth** — `oras login` / `~/.docker/config.json` works for
-  GHCR, Harbor, ECR, GCR, Artifactory, anything OCI-compliant.
-- **Mirroring** — registries are designed for replication; large server
-  fleets can mirror packs into a private registry without touching
-  modpack-author CDNs.
-- **Garbage collection** — OCI registries already know how to GC unreferenced
-  blobs, so retiring an old pack tag actually frees the storage.
 
 ---
 
