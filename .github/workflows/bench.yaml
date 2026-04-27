@@ -1,0 +1,62 @@
+name: bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_bytes:
+        description: "Synthetic shared-base size (bytes)"
+        required: false
+        default: "5242880"   # 5 MiB
+      overlay_bytes:
+        description: "Synthetic per-pack overlay size (bytes)"
+        required: false
+        default: "1048576"   # 1 MiB
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install oras
+        uses: oras-project/setup-oras@v1
+        with:
+          version: 1.2.2
+
+      - name: Resolve registry namespace
+        id: registry
+        run: |
+          ns="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          echo "ref=ghcr.io/${ns}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" \
+          | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Run benchmark
+        env:
+          REGISTRY: ${{ steps.registry.outputs.ref }}
+          BASE_BYTES: ${{ inputs.base_bytes }}
+          OVERLAY_BYTES: ${{ inputs.overlay_bytes }}
+          BENCH_OUT: ${{ github.workspace }}/bench-result.md
+        run: ./scripts/bench.sh
+
+      - name: Publish results to job summary
+        run: |
+          {
+            echo "## Bench results"
+            echo
+            cat bench-result.md
+            echo
+            echo "<sub>Pull paths run from a single GitHub-hosted Ubuntu runner against ghcr.io. Numbers will swing run-to-run; the layer-reuse ratio is the stable signal.</sub>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-result
+          path: bench-result.md
+          if-no-files-found: error
