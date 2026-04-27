@@ -14,8 +14,6 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    env:
-      REGISTRY: ghcr.io/${{ github.repository }}
     steps:
       - uses: actions/checkout@v5
 
@@ -23,6 +21,15 @@ jobs:
         uses: oras-project/setup-oras@v1
         with:
           version: 1.2.2
+
+      # OCI repository names must be lowercase per the distribution spec, so
+      # we can't just reuse ${{ github.repository }} verbatim if the owner or
+      # repo has any uppercase characters.
+      - name: Resolve registry namespace
+        id: registry
+        run: |
+          ns="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          echo "ref=ghcr.io/${ns}" >> "$GITHUB_OUTPUT"
 
       # PRs can't publish (no write to GHCR from forks); they just verify the
       # build is reproducible by comparing layer digests across packs.
@@ -47,6 +54,7 @@ jobs:
 
       - name: Build (and maybe push) packs
         env:
+          REGISTRY: ${{ steps.registry.outputs.ref }}
           PUSH: ${{ steps.mode.outputs.push }}
           TAG: ${{ steps.mode.outputs.tag }}
         run: ./scripts/build-and-push.sh
